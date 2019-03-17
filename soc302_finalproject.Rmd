@@ -1,0 +1,543 @@
+---
+title: 'SOC 302: Final Project'
+author: "Chelsea King, Angelina Lo"
+date: "3/26/2019"
+output: word_document
+---
+
+Speed date data was based off three speed dating sessions in 2005 and includes survey and audio data. Data was collected by Professor Daniel McFarland (Stanford University). We performed unsupervised and supervised learning methods as well as text analysis to predict whether participants matched or not.
+
+Special thanks to Sanne Smith, Daniel McFarland, Klint Kanopka, and AJ Alvero for helping us with this project.
+
+The following chunks are code for our unsupervised and supervised learning methods.
+
+```{r}
+library(tidyverse)
+library(FactoMineR)
+library(factoextra)
+library(class)
+library(car)
+library(e1071)
+library(glmnet)
+library(gridExtra)
+```
+
+
+```{r}
+# 1. Load presurvey data set
+presurvey <- read.csv("pre_survey_speed_data.csv", header = T)
+head(presurvey) # the header didn't load correctly
+
+# steps to fix header
+tempDF <- presurvey 
+tempDF[] <- lapply(presurvey, as.character)
+colnames(presurvey) <- tempDF[1, ]
+presurvey <- presurvey[-1 ,]
+head(presurvey)
+tempDF <- NULL
+# ---
+
+glimpse(presurvey)
+presurvey <- presurvey[,-71] # column had all NAs so we removed it
+variable.names(presurvey)
+presurvey <- presurvey %>%
+  rename(selfid = ID) %>% # we have to change ID to selfid for merging later
+  select(-"",-Undergrad,-".1",-".2",-".3") # these columns were unnecessary
+  
+# 2. Load scoredcard data set
+scorecard <- read.csv("scorecard_speed_data.csv", header = T)
+glimpse(scorecard)
+scorecard <- scorecard[,!grepl("^X", names(scorecard))] # removing columns that start with X
+
+# 3. Load postsurvey data set
+postsurvey <- read.csv("post_survey_speed_data.csv", header = T)
+head(postsurvey)
+postsurvey <- postsurvey[-1 ,] 
+
+variable.names(postsurvey)
+postsurvey <- postsurvey %>%
+  rename(selfid = ID) %>%
+  select(-Friend1, -Friend2, -Friend3, -Friend4, -Friend5)
+head(postsurvey)
+
+# 4. Load match data set  
+match <- read.csv("match_speed_data.csv", header = T)
+variable.names(match)
+match <- match %>%
+  select(selfid, otherid, Match)
+head(match)
+```
+
+
+```{r merge all data sets}
+typeof(postsurvey$selfid)
+typeof(presurvey$selfid)
+typeof(scorecard$selfid)
+typeof(match$selfid)
+
+presurvey$selfid <- as.integer(as.character(presurvey$selfid))
+
+speed <- match %>%
+  full_join(presurvey, by = c("selfid" = "selfid"))
+
+postsurvey$selfid <- as.integer(as.character(postsurvey$selfid))
+
+speed <- speed %>%
+  full_join(postsurvey, by = c("selfid" = "selfid")) %>%
+  full_join(scorecard, by = c("selfid" = "selfid"))
+
+write.csv(speed, "speed_data.csv")
+speed <- read.csv("speed_data.csv")
+glimpse(speed)
+```
+
+
+```{r final data wrangling of speed data}
+speed <- speed %>%
+  mutate_all(as.character) %>%
+  mutate_all(as.numeric)
+
+speed$Match.y <- as.factor(speed$Match.y)
+
+which(is.na(speed$Match.y))
+
+speed <- speed[-(7165:7169),]
+
+speed <- speed %>%
+  replace(is.na(.), 0)
+```
+
+
+```{r set training and test set of data}
+set.seed(1234)
+p <- 0.5
+sample <- sample(1:nrow(speed), p*nrow(speed), replace = F)
+train <- speed[sample, ]
+test  <- speed[-sample, ]
+```
+
+
+```{r null model}
+prop.table(table(speed$Match.y)) * 100
+# If our model would be to assume that nobody matched, we'd be correct 70% of the time. We can call this model our null model.
+```
+
+
+```{r logistic regression model: multivariate}
+# Let's now estimate a multivariate model where we add all our predictors.
+
+my_formula <- as.formula("Match.y ~ o_flirt + o_awk + o_assert + o_attrct + o_ambits +  o_crteos + o_sincre + o_intell + shared + o_funny + enjoy + clicked + o_fndly + os1wlthy")
+
+mod_lr <- glm(my_formula, data = train, family = binomial)
+summary(mod_lr)
+
+# Testing for multicollinearity
+vif(mod_lr) # We see moderate correlation for intelligence, shared, enjoy, and clicked, but the VIFs are not large enough for us to be too concerned
+
+# Testing the linearity assumption
+continuous_xs <- train[,3:16] 
+predictors <- colnames(continuous_xs)
+continuous_xs <- continuous_xs %>%
+  mutate(logit = log(probabilities/(1 - probabilities))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+head(continuous_xs)
+
+ggplot(continuous_xs, aes(logit, predictor.value)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+
+# We seem to need quadratic terms for the following variables with non-linear LOESS curves: o_ambits, o_crteous, o_fndly, and os1wealthy
+mod_lr_quad <- glm(Match.y ~ o_flirt + o_awk + o_assert + o_attrct + I(o_ambits^2) +  I(o_crteos^2) + o_sincre + o_intell + shared + o_funny + enjoy + clicked + I(o_fndly^2) + I(os1wlthy^2), data = train, family = binomial)
+summary(mod_lr_quad) # Some quadratic terms were not significant, so we'll only add quadratics to those that were
+
+final_lr <- glm(Match.y ~ o_flirt + o_awk + o_assert + o_attrct + I(o_ambits^2) +  o_crteos + o_sincre + o_intell + shared + o_funny + enjoy + clicked + o_fndly + I(os1wlthy^2), data = train, family = binomial)
+
+# largest coefficients
+results <- summary(final_lr)
+coefficients <- data.frame(results$coefficients)
+coefficients$variable <- rownames(coefficients)
+head(arrange(coefficients, desc(Estimate)))
+tail(arrange(coefficients, desc(Estimate)))
+results
+```
+
+
+```{r creating a coefficient plot for data visualization}
+coefs = as.data.frame(summary(final_lr)$coefficients[-1,c(1:2,4)])
+coefs$vars = rownames(coefs)
+names(coefs)[2:3] = c("se", "p") 
+
+coefs <- coefs %>%
+  filter(p <= 0.05)
+
+coefplot <- ggplot(coefs[c(-1, -2),], aes(vars, Estimate)) + 
+  geom_errorbar(aes(ymin = Estimate - 1.96*se, ymax = Estimate + 1.96*se), 
+                lwd = 1, colour = "steelblue4", width = 0) +
+  geom_errorbar(aes(ymin = Estimate - se, ymax = Estimate + se), 
+                lwd = 2.5, color = "steelblue3", width = 0) +
+  geom_point(size = 4, pch = 21, fill = "aliceblue") +
+  geom_hline(yintercept = 0, lty = 2, color = "grey50", alpha = 0.6) +
+  ggtitle("Coefficient plot of significiant findings") +
+  xlab("Variable") + 
+  ylab("Estimate") +
+  coord_flip()
+coefplot
+```
+
+
+```{r multivariate logistic regression performance}
+# Confusion Table
+
+probabilities <- predict(final_lr, type = "response")
+pred_match_lr <- if_else(probabilities < 0.5, 0, 1)
+
+confusion_lr <- table(pred_match_lr, train$Match.y)
+sum(diag(confusion_lr)) / nrow(train)
+
+# Our logistic regression model predicted 75% of the cases correctly. 
+```
+
+
+```{r PCA}
+train <- select(train, Match.y, selfid, starts_with("o_"), shared, clicked, enjoy, os1wlthy)
+
+o_pca <- PCA(train[-c(1,2)], graph = TRUE) # Remove selfid for later
+
+# Determining number of dimensions
+get_eigenvalue(o_pca) # After 3 dimensions, the eigenvalues drop below 1, so we'll use 3 dimensions
+fviz_eig(o_pca, addlabels = TRUE, ylim = c(0, 40)) # There's no clear elbow. Variance seems to drop significantly after the first dimension, but we'll include dimension 2 and dimension 3 since their eigenvalues are greater than 1.
+
+# Analyzing dimensions
+varother <- get_pca_var(o_pca)
+varother$contrib
+varother$coord
+
+d1 <- fviz_contrib(o_pca, choice = "var", axes = 1, title = "D1")
+d2 <- fviz_contrib(o_pca, choice = "var", axes = 2, title = "D2")
+d3 <- fviz_contrib(o_pca, choice = "var", axes = 3, title = "D3")
+d4 <- fviz_contrib(o_pca, choice = "var", axes = 4, title = "D4")
+
+grid.arrange(d1, d2, d3, d4,  nrow = 2,  
+             top = ("Contributions by dimension"))
+```
+
+
+```{r predict matching with our principal components}
+ind <- get_pca_ind(o_pca)
+
+train <- train %>%
+  mutate(pc1 = ind$coord[,1],
+         pc2 = ind$coord[,2],
+         pc3 = ind$coord[,3])
+
+pca_log_model <- glm(Match.y ~ pc1 +  pc2 + pc3, data = train, family = binomial)
+summary(pca_log_model)
+```
+
+
+```{r pca regression performance}
+# Confusion Table
+probabilities <- predict(pca_log_model, type = "response")
+pred_match_pca <- if_else(probabilities < 0.5, 0, 1)
+
+confusion_pca <- table(pred_match_pca, train$Match.y)
+sum(diag(confusion_pca)) / nrow(train)
+
+# When we use this logistic model with pca we predict 72% of the cases correctly, only 2% better than the null model and 2% less than the logistic regression model.
+```
+
+
+```{r lasso regression: preparing data}
+x <- model.matrix(my_formula, data = speed)
+y <- speed$Match.y
+
+set.seed(1234)
+trainl <- sample(1:nrow(x), nrow(x)/2)
+testl <- (-trainl)
+ytest <- y[testl]
+
+lassomod <- glmnet(x[trainl,], y[trainl], alpha = 1, family = "binomial")
+
+set.seed(1234)
+cvout <- cv.glmnet(x[trainl,], y[trainl], alpha = 1, family = "binomial")
+cvout
+bestlam <- cvout$lambda.min
+bestlam
+out <- glmnet(x, y, alpha = 1, family = "binomial")
+lassocoef <- predict(out, type = "coefficients", s = bestlam)
+lassocoef
+```
+
+
+```{r lasso regression using suggested variables}
+lasso_log_mod <- glm(Match.y ~ o_flirt + o_awk + o_ambits + o_intell + clicked, data = train, family = binomial)
+summary(lasso_log_mod)
+```
+
+
+```{r lasso coefficient plot for data visualization}
+coefs = as.data.frame(summary(lasso_log_mod)$coefficients[-1,c(1:2,4)])
+coefs
+coefs$vars = rownames(coefs)
+names(coefs)[2:3] = c("se", "p") 
+coefs
+
+coefplot <- ggplot(coefs, aes(vars, Estimate)) + 
+  geom_errorbar(aes(ymin = Estimate - 1.96*se, ymax = Estimate + 1.96*se), 
+                lwd = 1, colour = "darksalmon", width = 0) +
+  geom_errorbar(aes(ymin = Estimate - se, ymax = Estimate + se), 
+                lwd = 2.5, color = "coral2", width = 0) +
+  geom_point(size = 4, pch = 21, fill = "beige") +
+  geom_hline(yintercept = 0, lty = 2, color = "grey50", alpha = 0.6) +
+  ggtitle("Coefficient plot of significiant findings") +
+  xlab("Variable") + 
+  ylab("Estimate") +
+  coord_flip()
+coefplot
+```
+
+
+```{r lasso regression performance}
+# Confusion Table
+probabilities <- predict(lasso_log_mod, type = "response")
+pred_match_lasso <- if_else(probabilities < 0.5, 0, 1)
+
+confusion_lasso <- table(pred_match_lasso, train$Match.y)
+sum(diag(confusion_lasso)) / nrow(train)
+
+# When we use this logistic model with optimal variables suggested by lasso, we predict 74% of the cases correctly, 4% better than the null model and 1% less than the logistic regression model.
+```
+
+
+```{r support vector machines}
+train_svm <- select(train, Match.y, o_flirt, o_awk, o_assert, o_attrct, o_ambits, o_crteos, o_sincre, o_intell, shared, o_funny, enjoy, clicked, o_fndly)
+
+# We will specify a polynomial kernel because we suspect non-linearity and take a range of c values. We now need a dataset with all the predictors.
+mods_svm <- tune(svm, Match.y ~ o_flirt + o_awk + o_assert + o_attrct + o_ambits +  o_crteos + o_sincre + o_intell + o_funny  + o_fndly + shared + clicked + enjoy, 
+                 data = train, 
+                 kernel = "polynomial",
+                 probability = TRUE,
+                 ranges = list(cost = c(0.001, 0.01, 0.1, 1, 5, 10, 100)))
+
+summary(mods_svm)
+names(mods_svm)
+plot(mods_svm$performances)
+mod_svm <- mods_svm$best.model
+summary(mod_svm)
+```
+
+
+```{r svm performance}
+# Confusion Table
+pred_svm <- predict(mod_svm)
+confusion_svm <- table(pred_svm, train$Match.y)
+sum(diag(confusion_svm)) / nrow(train)
+
+# SVM has done the best job so far on the training set; it correctly classifed 89% of the cases correctly.
+```
+
+
+```{r preparing test data}
+test <- select(test, Match.y, selfid, starts_with("o_"), shared, clicked, enjoy, os1wlthy)
+
+test <- test %>%
+  mutate(pc1 = ind$coord[,1],
+         pc2 = ind$coord[,2],
+         pc3 = ind$coord[,3])
+```
+
+
+```{r training predictions tibble}
+predictions_train <- tibble(
+  y = as.character(train$Match.y),
+  type = "train",
+  mod_lr = predict(mod_lr, type = "response"),
+  mod_svm = predict(mod_svm, type = "class"),
+  pca_log_model = predict(pca_log_model, type = "response"),
+  lasso_log_mod = predict(lasso_log_mod, type = "response"))
+predictions_train
+```
+
+
+```{r evaluating models with test data}
+# Multivariate Logistic Regression Test Accuracy
+probabilities <- predict(mod_lr, newdata = test, type = "response")
+pred_match_lr <- if_else(probabilities < 0.5, 0, 1)
+
+confusion_lr <- table(pred_match_lr, test$Match.y)
+sum(diag(confusion_lr)) / nrow(test)
+
+# 0.7208264
+
+# PCA Regression Test Accuracy
+probabilities <- predict(pca_log_model, newdata = test, type = "response")
+pred_match_pca <- if_else(probabilities < 0.5, 0, 1)
+
+confusion_pca <- table(pred_match_pca, test$Match.y)
+sum(diag(confusion_pca)) / nrow(test)
+
+# 0.6557789
+
+# Lasso Regression Analysis Model Test Accuracy
+probabilities <- predict(lasso_log_mod, newdata = test, type = "response")
+pred_match_lasso <- if_else(probabilities < 0.5, 0, 1)
+
+confusion_lasso <- table(pred_match_lasso, test$Match.y)
+sum(diag(confusion_lasso)) / nrow(test)
+
+# 0.7191513
+
+# SVM Test Accuracy
+mods_svm <- svm(Match.y ~ o_flirt + o_awk + o_assert + o_attrct + o_ambits +  o_crteos + o_sincre + o_intell + o_funny  + o_fndly + shared + clicked + enjoy,
+                 data = test, 
+                 kernel = "polynomial",
+                 probability = TRUE,
+                 cost = 100)
+summary(mods_svm)
+
+pred_svm <- predict(mods_svm)
+confusion_svm <- table(pred_svm, test$Match.y)
+sum(diag(confusion_svm)) / nrow(test)
+
+# 0.8841429 
+```
+
+
+```{r test predictions tibble}
+predictions_test <- tibble(
+  y = as.character(test$Match.y),
+  type = "test",
+  mod_lr = predict(mod_lr, newdata = test, type = "response"),
+  mod_svm = predict(mod_svm, newdata = test, type = "class"),
+  lasso_log_mod = predict(lasso_log_mod, newdata = test, type = "response"),
+  pca_log_model = predict(pca_log_model, newdata = test, type = "response"))
+predictions_test
+
+predictions <- bind_rows(predictions_train, predictions_test)
+
+predictions <- predictions %>%
+  mutate(pca_log_model = if_else(pca_log_model < 0.5, 0, 1),
+         lasso_log_mod = if_else(lasso_log_mod < 0.5, 0, 1),
+         mod_lr = if_else(mod_lr < 0.5, 0, 1)) %>%
+  gather(key = "model", value = "y_hat", -type, -y)
+predictions
+
+predictions_summary <- predictions %>%
+  group_by(model, type) %>%
+  summarize(N = n(), correct = sum(y == y_hat, 0),
+            positives = sum(y == 1),
+            true_pos = sum(y_hat == 1 & y == y_hat),
+            false_pos = sum(y_hat == 1 & y != y_hat)) %>%
+  mutate(accuracy = correct / N, 
+         tpr = true_pos / positives,
+         fpr = false_pos / (N - positives)) %>%
+  ungroup() %>%
+  gather(val_type, val, -model, -type) %>%
+  unite(temp1, type, val_type, sep = "_") %>%
+  spread(temp1, val) %>%
+  arrange(desc(test_accuracy)) %>%
+  select(model, train_accuracy, test_accuracy, test_tpr, test_fpr)
+predictions_summary
+
+predictions_test
+
+predicted_prob <- tibble(
+  y = as.character(test$Match.y),
+  type = "test",
+  lasso_log_mod = predict(lasso_log_mod, newdata = test, type = "response"),
+  pca_log_model = predict(pca_log_model, newdata = test, type = "response"),
+  mod_lr = predict(mod_lr, newdata = test, type = "response"),
+  mod_svm = predict(mod_svm, newdata = test, type = "prob"))
+predicted_prob
+
+
+head(predict(mod_svm, newdata = test, probability = TRUE, type = "prob"))
+svm_pred <- predict(mod_svm, newdata = test, probability = TRUE, type = "prob")
+head(svm_pred)
+
+
+predicted_prob <- tibble(
+  y = as.character(test$Match.y),
+  type = "test",
+  lasso_log_mod = predict(lasso_log_mod, newdata = test, type = "response"),
+  pca_log_model = predict(pca_log_model, newdata = test, type = "response"),
+  mod_lr = predict(mod_lr, newdata = test, type = "response"),
+  mod_svm = attr(svm_pred, "probabilities")[,1])
+predicted_prob
+```
+
+
+```{r ROC curves}
+t <- seq(from = 0, to = 1, by = 0.001)
+
+lasso_tp <- pca_tp <- lr_tp <- svm_tp <- c()
+lasso_fp <- pca_fp <- lr_fp <- svm_fp <- c()
+
+# Compute the false positive and true positive values for each model at each threshold value in a loop:
+for (i in 1:length(t)) {
+  threshold <- t[i]
+  lasso_tp[i] <- sum(predicted_prob$lasso_log_mod >= threshold & predicted_prob$y == 1) /
+    nrow(predicted_prob)
+  lasso_fp[i] <- sum(predicted_prob$lasso_log_mod >= threshold & predicted_prob$y == 0) /
+    nrow(predicted_prob)
+  pca_tp[i] <- sum(predicted_prob$pca_log_model >= threshold & predicted_prob$y == 1) /
+    nrow(predicted_prob)
+  pca_fp[i] <- sum(predicted_prob$pca_log_model >= threshold & predicted_prob$y == 0) /
+    nrow(predicted_prob)
+  svm_tp[i] <- sum(predicted_prob$mod_svm >= threshold & predicted_prob$y == 1) /
+    nrow(predicted_prob)
+  svm_fp[i] <- sum(predicted_prob$mod_svm >= threshold & predicted_prob$y == 0) /
+    nrow(predicted_prob)
+  lr_tp[i] <- sum(predicted_prob$mod_lr >= threshold & predicted_prob$y == 1) /
+    nrow(predicted_prob)
+  lr_fp[i] <- sum(predicted_prob$mod_lr >= threshold & predicted_prob$y == 0) /
+    nrow(predicted_prob)
+}
+
+roc_data <- tibble(
+  t, lr_tp, lr_fp, pca_tp, pca_fp, lasso_tp, lasso_fp, svm_tp, svm_fp
+)
+
+ggplot(data = roc_data) +
+  geom_step(aes(x = lr_fp, y = lr_tp, color = "Logit")) + 
+  geom_step(aes(x = svm_fp, y = svm_tp, color = "SVM")) +
+  geom_step(aes(x = pca_fp, y = pca_tp, color = "PCA")) +
+  geom_step(aes(x = lasso_fp, y = lasso_tp, color = "Lasso")) +
+  scale_color_brewer(palette = "Dark2", name = "Model") +
+  ggtitle("ROC Curves") +
+  ylab("True Positives") +
+  xlab("False Positives") +
+  theme_bw()
+```
+
+
+The chunks below are for further analysis that will be included in the discussion section of the final paper.
+
+```{r principal components analysis for self}
+# we use PCA to find the variables that contribute the most variance
+speed_date_sd <- select(speed, selfid, starts_with("sd1"))
+glimpse(speed_date_sd)
+speed_date_sd <- speed_date_sd %>%
+  mutate_all(as.character) %>%
+  mutate_all(as.numeric)
+
+sd_sd_pca <- PCA(speed_date_sd[-1], graph = TRUE) # we remove selfid for later
+get_eigenvalue(sd_sd_pca) # After 4 dimensions, the eigenvalues drop below 1, so we'll use 4 dimensions
+fviz_eig(sd_sd_pca, addlabels = TRUE, ylim = c(0, 40)) # There's no clear elbow. To capture more than 60% of the variance, we use up to 4 dimensions
+varsd <- get_pca_var(sd_sd_pca)
+varsd$coord
+sd_sd_pca
+```
+
+
+```{r pca dimensions of self variables}
+d1 <- fviz_contrib(sd_sd_pca, choice = "var", axes = 1, title = "D1")
+d2 <- fviz_contrib(sd_sd_pca, choice = "var", axes = 2, title = "D2")
+d3 <- fviz_contrib(sd_sd_pca, choice = "var", axes = 3, title = "D3")
+d4 <- fviz_contrib(sd_sd_pca, choice = "var", axes = 4, title = "D4")
+
+grid.arrange(d1, d2, d3, d4,  nrow = 2,  
+             top = ("Contributions by dimension"))
+```
