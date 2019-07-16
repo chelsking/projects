@@ -1,0 +1,566 @@
+---
+title: "SOC 172 Final Project"
+author: "Chelsea, Atlanta"
+date: "5/3/2019"
+output: word_document
+---
+
+```{r}
+library(tidyverse)
+library(tidytext)
+library(wordcloud)
+library(tm)
+library(topicmodels)
+library(tcR)
+library(wordcloud2)
+```
+
+Data was scraped from the Washington Post's website
+
+Set Up
+
+```{r}
+wp <- read.csv("wp_policeshootings.csv", header = FALSE)
+colnames(wp) <- c("name", "blurb", "gender", "armed_with", 
+                  "race", "threat", "mental_illness", "age", "news_urls")
+head(wp)
+```
+
+
+```{r}
+# Importing updated CSV with text from news articles
+textshootings <- read.csv("policeshooting_text.csv", header = TRUE)
+head(textshootings)
+variable.names(textshootings)
+```
+
+Data Wrangling
+
+```{r}
+textshootings <- textshootings %>%
+  mutate_all(as.character) %>% 
+  filter(blurb != "") %>% 
+  filter(race != "")
+
+textshootings$race <- tolower(textshootings$race)
+textshootings$name <- tolower(textshootings$name)
+textshootings$armed_with <- tolower(textshootings$armed_with)
+
+head(textshootings)
+NROW(textshootings)
+unique(textshootings$race)
+write.csv(textshootings, "blurb.csv")
+```
+
+We need to remove names from the csv file, and python has a library that allows us to do this. After replacing names in the csv file, we insert it back into R.
+
+```{r}
+blurbs <- read.csv("blurb_clean.csv", header = TRUE)
+head(blurbs)
+```
+
+As seen in the top 6 rows, the names in the blurb column are replaced. Next, we need to wrangle the data in the blurb_clean.csv file.
+
+```{r}
+blurbs <- blurbs %>% 
+  mutate_all(as.character)
+```
+
+Data Description
+
+```{r}
+unique(blurbs$gender)
+NROW(blurbs[blurbs$gender == "Male",]) # 889
+NROW(blurbs[blurbs$gender == "Female",]) # 39
+
+par(mfrow = c(2,2))
+g <- ggplot(data = blurbs, aes(x = gender, y = length(gender))) +
+  geom_bar(stat = "identity", width = 0.5, fill = "steelblue") +
+  theme_minimal()
+g + ggtitle("Gender")
+
+r <- ggplot(data = blurbs, aes(x = race, y = length(race))) +
+  geom_bar(stat = "identity", width = 0.5, fill = "steelblue") +
+  theme_minimal()
+r + ggtitle("Race")
+
+mental_ill_count <- blurbs %>% 
+  filter(mental_illness == 1)
+
+m <- ggplot(data = mental_ill_count, aes(x = race, y = length(mental_illness))) +
+  geom_bar(stat = "identity", width = 0.5, fill = "steelblue") +
+  theme_minimal()
+m + ggtitle("Mental Illness by Race")
+
+# ------------------------
+unique(blurbs$armed_with)
+armed_count <- blurbs %>% 
+  filter(armed_with == "unarmed" |
+           armed_with == "deadly weapon" |
+           armed_with == "toy weapon")
+
+a <- ggplot(data = armed_count, aes(x = armed_with, y = length(armed_with))) +
+  geom_bar(stat = "identity", width = 0.5, fill = "steelblue") +
+  theme_minimal()
+a + ggtitle("Armed With")
+
+deadly_weapon_count <- blurbs %>% 
+  filter(armed_with == "deadly weapon")
+
+d <- ggplot(data = deadly_weapon_count, aes(x = race, y = length(armed_with))) +
+  geom_bar(stat = "identity", width = 0.5, fill = "steelblue") +
+  theme_minimal()
+d + ggtitle("Deadly Weapon by Race")
+
+unarmed_count <- blurbs %>% 
+  filter(armed_with == "unarmed")
+
+u <- ggplot(data = unarmed_count, aes(x = race, y = length(armed_with))) +
+  geom_bar(stat = "identity", width = 0.5, fill = "steelblue") +
+  theme_minimal() +
+  ggtitle("Unarmed by Race")
+u
+
+toy_weapon_count <- blurbs %>% 
+  filter(armed_with == "toy weapon")
+t <- ggplot(data = toy_weapon_count, aes(x = race, y = length(armed_with))) +
+  geom_bar(stat = "identity", width = 0.5, fill = "steelblue") +
+  theme_minimal() +
+  ggtitle("Toy Weapon by Race")
+t
+```
+
+
+TF-IDF: Round 1
+
+```{r}
+news_words <- blurbs %>%
+  unnest_tokens(word, blurb) %>%
+  count(race, word, sort = TRUE) %>%
+  ungroup()
+news_words
+
+# total number of words by news company
+total_words <- news_words %>% 
+  group_by(race) %>% 
+  summarize(total = sum(n))
+total_words
+
+# join them
+news_words <- left_join(news_words, total_words)
+news_words
+
+# We would like to give those common words a low weight, because the, of, and 
+# are words we are not interested in. If every description uses them heavily, we
+# won't learn much! A very common weighting method is the tf-idf. tf-idf 
+# singles out words that are common, but not too common.
+news_words <- news_words %>%
+  bind_tf_idf(word, race, n)
+news_words
+
+
+# See how a word like the is weighted now by 0? Now we can focus on important
+# words. And plot them. We take the 100 words with the highest td_idf for each
+# publisher. 
+words_50 <- news_words %>%
+  group_by(race) %>%
+  top_n(50, tf_idf) %>%
+  ungroup() %>%
+  arrange(race, -tf_idf)
+words_50
+
+
+# Visualization
+words_50 %>%
+  mutate(word = reorder(word, tf_idf)) %>%
+  ggplot(aes(word, tf_idf, fill = factor(race))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ race, scales = "free") +
+  coord_flip()
+```
+
+We now use these top most salient words and analyze them in multiple ways: (1) perform sentiment analysis to guage the types of feelings that these words produce and (2) LDA
+
+
+Sentiment Analysis
+
+```{r}
+words_100 <- news_words %>%
+  group_by(race) %>%
+  top_n(100, tf_idf) %>%
+  ungroup() %>%
+  arrange(race, -tf_idf)
+words_100
+
+
+# positive words
+positive_words <- get_sentiments("nrc") %>% 
+  filter(sentiment == "positive")
+
+# Now let's identify which race has the most positive descriptions attached to it
+words_100 %>%
+  inner_join(positive_words) %>%
+  group_by(race) %>%
+  summarize(n_positive = sum(n), total = first(total)) %>%
+  mutate(p_positive = n_positive / total) %>%
+  arrange(desc(p_positive))
+
+# The results indicate that blurbs describing Asian victims use the most positive words. 
+
+# What about negative words?
+negative_words <- get_sentiments("nrc") %>% 
+  filter(sentiment == "negative")
+
+negative <- words_100 %>%
+  inner_join(negative_words) %>%
+  group_by(race) %>%
+  summarize(n_negative = sum(n), total = first(total)) %>%
+  mutate(p_negative = n_negative / total) %>%
+  arrange(desc(p_negative))
+
+negative
+
+negative <- words_100 %>%
+  inner_join(negative_words) %>%
+  group_by(race) %>%
+  count(word, sort = TRUE)
+
+negative
+
+set.seed(1234)
+wordcloud(words = negative$word, freq = negative$nn, min.freq = 0, random.order = FALSE, scale = c(2,2), rot.per = .5,vfont = c("sans serif","plain"))
+
+# fear words?
+nrc_fear <- get_sentiments("nrc") %>% 
+  filter(sentiment == "fear")
+
+fear <- words_100 %>%
+  group_by(race) %>%
+  inner_join(nrc_fear) %>%
+  count(word, sort = TRUE)
+```
+
+
+
+LDA
+
+```{r}
+# Cleaning data for topic modelling
+black_white_corpus <- blurbs %>% 
+  filter(race == "white" | race == "black")
+black_white_corpus
+```
+
+```{r}
+by_race <- black_white_corpus %>%
+  select(-X.1, -X) %>% 
+  group_by(race) %>%
+  unite(document, race)
+by_race
+```
+
+
+```{r}
+# corpus
+news_corpus <- with(by_race, VCorpus(VectorSource(blurb)))
+news_corpus
+news_corpus[[1]] %>%
+  as.character() %>%
+  str_wrap()
+
+
+# cleaning corpus
+
+news_corpus <- news_corpus %>%
+  tm_map(stripWhitespace) %>%
+  tm_map(removeNumbers) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(content_transformer(tolower)) %>%
+  tm_map(stemDocument) %>%
+  tm_map(removeWords, c(stopwords("english"), "police", "name", "fatal", 
+                        "shooting", "yearold"))
+news_corpus
+```
+
+
+
+```{r}
+# wordcloud
+dtm <- DocumentTermMatrix(news_corpus, control = list(weighting = weightTfIdf))
+dtm
+
+
+# high tf-idf
+length(findFreqTerms(dtm, lowfreq =  1))
+findFreqTerms(dtm, lowfreq =  1)
+
+
+# We can calculate the score of each word across all blurbs
+dtm %>% as.matrix() %>%
+  apply(MARGIN = 2, sum) %>%
+  sort(decreasing = TRUE) %>%
+  head(100)
+```
+
+
+```{r}
+# We can also look at associations between words. Which words co-occur with
+# black and which with white?
+findAssocs(dtm, terms = "black", corlimit = 0.1)
+findAssocs(dtm, terms = "white", corlimit = 0.1)
+```
+
+```{r}
+# LDA
+burnin <- 200 # number of omitted Gibbs iterations at beginning
+iter <- 400 # number of iterations
+thin <- 200 # number of omitted in-between Gibbs iterations
+seed <- list(2003,5,63,100001,765) #seeds can be set to enable reproducibility
+nstart <- 5 # number of repeated random starts
+best <- TRUE # only continue model on the best model
+k <- 10 # Set the number of topics (more on the number of topics below)
+
+
+# LDA wants a frequency document term matrix, not a weighted one by tf-idf
+dtm <- DocumentTermMatrix(news_corpus)
+
+# Run LDA using Gibbs sampling. It's going to take a while (2-5 min)...
+lda_news <- LDA(dtm, 
+               k, 
+               method = "Gibbs", 
+               control = list(nstart = nstart, seed = seed, best = best,
+                            burnin = burnin, iter = iter, thin = thin))
+
+
+# So every thesis is now assigned to a topic. We have 10 topics because we asked for 10 topics (k = 10)
+table(topics(lda_news))
+
+# per-topic-per-word probabilities (beta) from our lda object
+news_topics <- tidy(lda_news, matrix = "beta")
+news_topics
+```
+
+```{r}
+# group by topic and get the top 10 words in terms of their
+# probability
+news_topics_10 <- news_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+news_topics_10
+
+
+# visualize
+news_topics_10 %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()
+
+# gamma index
+news_documents <- tidy(lda_news, matrix = "gamma")
+news_documents
+
+# adding race column
+race_column <- by_race %>% 
+  select(document)
+
+race_list <- race_column$document
+NROW(race_list)
+
+race_list_rep <- rep(race_list, 10)
+
+df <- cbind(race_list, race_list_rep)
+df
+
+news_doc_race <- news_documents %>% 
+  mutate(race = race_list_rep)
+news_doc_race
+```
+
+
+calculate average of lda scores of white vs. black, find out which loads heavily
+
+```{r}
+qplot(news_documents$gamma)
+
+# The majority of news are a mixture of topics. The median is approx. 10%.
+median(news_documents$gamma)
+
+news_doc_race %>%
+  top_n(10, gamma) %>%
+  arrange(desc(gamma))
+```
+
+
+```{r}
+library("Rmpfr")
+# harmonic mean
+harmonicMean <- function(logLikelihoods, precision=2000L) {
+  library("Rmpfr")
+  llMed <- median(logLikelihoods)
+  as.double(llMed - log(mean(exp(-mpfr(logLikelihoods,
+                                       prec = precision) + llMed))))
+}
+
+k = 5
+burnin = 200
+iter = 400
+keep = 50
+
+lda_news5 <- LDA(dtm, k = k, method = "Gibbs",
+                control = list(burnin = burnin, iter = iter, keep = keep))
+
+logLiks <- lda_news5@logLiks[-c(1:(burnin/keep))]
+
+harmonicMean(logLiks)
+
+sequ <- seq(2, 30, 3) 
+lda_news_many <- lapply(sequ, function(k) LDA(dtm, k = k, method = "Gibbs",
+                                              control = list(burnin = burnin, 
+                                                             iter = iter,
+                                                             keep = keep)))
+
+logLiks_many <- lapply(lda_news_many, function(L)  L@logLiks[-c(1:(burnin/keep))])
+
+hm_many <- sapply(logLiks_many, function(h) harmonicMean(h))
+
+# Inspect
+plot(sequ, hm_many, type = "l")   # Higher --> Better...
+
+
+# Compute optimum number of topics
+sequ[which.max(hm_many)]
+
+
+# 26 topics seem to be better than 5 according to this method.
+# Let's update our model
+burnin <- 200
+iter <- 400
+thin <- 200
+seed <- list(2003,5,63,100001,765)
+nstart <- 5
+best <- TRUE
+k <- 26
+
+lda_news_26 <- LDA(dtm, k, method = "Gibbs", 
+                  control = list(nstart = nstart, seed = seed, best = best, 
+                                 burnin = burnin, iter = iter, thin = thin))
+
+
+
+# And visualize the results again
+news_topics_26 <- tidy(lda_news_26, matrix = "beta")
+news_topics_26
+
+
+news_topics_26_10 <- news_topics_26 %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+news_topics_26_10
+
+# visualization
+news_topics_26_10 %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank()) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()
+```
+
+
+
+```{r}
+news_topics_26_g <- tidy(lda_news_26, matrix = "gamma")
+news_topics_26_g
+
+race_column <- by_race %>% 
+  select(document)
+
+race_list <- race_column$document
+NROW(race_list)
+
+race_list_rep <- rep(race_list, 26)
+
+df <- cbind(race_list, race_list_rep)
+df
+
+news_doc_race_26 <- news_topics_26_g %>% 
+  mutate(race = race_list_rep)
+news_doc_race_26
+
+# topic distribution
+
+black_topics <- news_doc_race_26 %>% 
+  filter(race == "black")
+black_topics
+
+for (i in (1:26)) {
+  print(sum(black_topics[black_topics$topic == i,]$gamma))
+}
+black_loadings <- c(10.01229, 8.949855, 10.12622, 10.46631, 9.590613, 9.814909, 9.597478, 9.963869, 10.10045, 10.47858, 10.2685, 9.261246, 9.452174, 10.42082, 9.03601, 10.15855, 10.20364, 10.59353, 11.02731, 9.596855, 10.04308, 9.77187, 9.631546, 9.787631, 9.965774, 9.680866)
+
+#
+white_topics <- news_doc_race_26 %>% 
+  filter(race == "white")
+
+for (i in (1:26)) {
+  print(sum(white_topics[white_topics$topic == i,]$gamma))
+}
+
+white_loadings <- c(18.97477, 19.58092, 18.5255, 18.53109, 19.76333, 19.02096, 18.82446, 18.51187, 18.59528, 19.65058, 18.85482, 20.24215, 19.44211, 18.47321, 20.89275, 19.34606, 19.02115, 18.54188, 17.50957, 19.6684, 18.71934, 19.30925, 19.27346, 19.34944, 19.20664, 19.171)
+
+#
+topic <- seq(1:26)
+black <- rep("black", 26)
+white <- rep("white", 26)
+race <- c(black, white)
+loadings <- c(black_loadings, white_loadings)
+topic <- seq(1:26)
+differences <- c(white_loadings - black_loadings) 
+
+df_unsep <- cbind.data.frame(topic, black_loadings, 
+                             white_loadings, differences)
+df_unsep
+# topic most loading for each race
+# topic with least loading for each race
+# max difference topic
+# min difference topic
+
+```
+
+
+```{r}
+max(df_unsep$differences) # topic 15
+min(df_unsep$differences) # topic 19
+max(black_loadings) # topic 19
+min(black_loadings) # topic 2
+max(white_loadings) # topic 15
+min(white_loadings) # topic 19
+```
+
+
+```{r}
+topic <- c(topic, topic)
+
+df <- cbind.data.frame(topic, race, loadings) 
+df
+
+load_vis <- ggplot(data = df, aes(topic, loadings, fill = race)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal()
+load_vis
+load_vis + ggtitle("Topical Loadings")
+```
+
+
+
+
+
